@@ -259,43 +259,35 @@ def add_to_watchlist(anime_row):
         else:
             st.warning(f"{anime_row['name']} is already in your watchlist!")
 
-def recommend_based_on_watchlist(n_recommendations=5):
-    if not st.session_state.current_user:
-        st.warning("You need to be logged in to get watchlist-based recommendations!")
-        return pd.DataFrame()
-    
-    user_data = st.session_state.user_profiles[st.session_state.current_user]
-    watchlist = user_data.get('watchlist', [])
-    
-    if not watchlist:
-        st.warning("Your watchlist is empty!")
-        return pd.DataFrame()
-    
-    # Get the genres of the anime in the watchlist
-    watchlist_genres = anime_df[anime_df['name'].isin(watchlist)]['genre']
-    
-    # Create a TF-IDF matrix for genres
-    tfidf = TfidfVectorizer()
-    genre_matrix = tfidf.fit_transform(anime_df['genre'])
-    
-    # Get the indices of the watchlist anime
-    watchlist_indices = anime_df[anime_df['name'].isin(watchlist)].index
-    
-    # Calculate the cosine similarity matrix
-    cosine_sim = cosine_similarity(genre_matrix, genre_matrix)
-    
-    # Get the average similarity scores for all anime based on the watchlist
-    similarity_scores = cosine_sim[watchlist_indices].mean(axis=0)
-    
-    # Get the top N recommendations
-    recommendations = anime_df.copy()
-    recommendations['similarity_score'] = similarity_scores
-    recommendations = recommendations.sort_values('similarity_score', ascending=False)
-    
-    # Exclude anime already in the watchlist
-    recommendations = recommendations[~recommendations['name'].isin(watchlist)]
-    
-    return recommendations.head(n_recommendations)[['anime_id', 'name', 'similarity_score', 'genre']]
+# Function to recommend similar anime based on watchlist
+def recommend_by_watchlist(watchlist, n_recommendations=2):
+    watchlist_ids = anime_df[anime_df['name'].isin(watchlist)]['anime_id']
+    all_similar_anime = []
+    for anime_id in watchlist_ids:
+        similar_anime = recommend_by_rating(anime_id, n_recommendations)
+        all_similar_anime.extend(similar_anime.index)
+    return anime_df.loc[all_similar_anime].drop_duplicates().head(n_recommendations)
+
+# Add a Streamlit tab for recommendations
+def display_recommendations():
+    if st.session_state.current_user:
+        user_data = st.session_state.user_profiles[st.session_state.current_user]
+        st.subheader("Recommendations Based on Your Ratings")
+        for anime_id in user_data['rated_anime']:
+            similar_anime = recommend_by_rating(anime_id)
+            st.write(f"Similar to {anime_df.loc[anime_id, 'name']}:")
+            for _, row in similar_anime.iterrows():
+                st.write(f"{row['name']} (Rating: {row['user_rating_avg']:.2f})")
+        
+        st.subheader("Recommendations Based on Your Watchlist")
+        watchlist = user_data['watchlist']
+        if watchlist:
+            similar_anime = recommend_by_watchlist(watchlist)
+            for _, row in similar_anime.iterrows():
+                st.write(f"{row['name']} (Rating: {row['user_rating_avg']:.2f})")
+        else:
+            st.write("Your watchlist is empty.")
+
 
 
 # Function to submit a rating
