@@ -72,7 +72,6 @@ The methodology for this project includes several key steps:
 <div class="alert alert-block alert-info">
 These libraries and tools collectively provide a comprehensive set of capabilities for handling data (pandas, numpy), manipulating text (re, nltk), and performing advanced natural language processing tasks (nltk). They are widely used in data science, machine learning, and text analytics projects due to their efficiency and versatility.
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -84,14 +83,28 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from difflib import get_close_matches
 import requests
-from bs4 import BeautifulSoup
 import re
+import time
+
+# Initialize user profiles in session state
+if 'user_profiles' not in st.session_state:
+    st.session_state.user_profiles = {}
+if 'current_user' not in st.session_state:
+    st.session_state.current_user = None
+if 'anime_ratings' not in st.session_state:
+    st.session_state.anime_ratings = {}
+if 'displayed_recommendations' not in st.session_state:
+    st.session_state.displayed_recommendations = {'Home': {}, 'Search': {}}
+
+# Initialize watchlist in session state
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = []
 
 # Load datasets (replace with your actual file paths)
-anime_df = pd.read_csv('anime.csv')
-train_df = pd.read_csv('train.csv')
+anime_df = pd.read_csv('cleaned_anime.csv')
+train_df = pd.read_csv('cleaned_train.csv')
 
-# Basic preprocessing (assuming genres and types are preprocessed and consistent)
+# Basic preprocessing
 anime_df.dropna(inplace=True)
 train_df.dropna(inplace=True)
 
@@ -106,12 +119,12 @@ encoded_type = label_encoder.fit_transform(anime_df['type']).reshape(-1, 1)
 # Calculate average rating per anime
 average_rating = train_df.groupby('anime_id')['rating'].mean()
 anime_df = anime_df.merge(average_rating, on='anime_id', how='left', suffixes=('', '_avg'))
-anime_df['rating_avg'].fillna(0, inplace=True)  # Fill NaN values for animes without ratings
+anime_df['rating_avg'].fillna(0, inplace=True)
 
 # Calculate number of ratings per anime
 num_ratings = train_df.groupby('anime_id').size()
 anime_df = anime_df.merge(pd.DataFrame(num_ratings, columns=['num_ratings']), on='anime_id', how='left')
-anime_df['num_ratings'].fillna(0, inplace=True)  # Fill NaN values
+anime_df['num_ratings'].fillna(0, inplace=True)
 
 # Normalize Numeric Features
 scaler = StandardScaler()
@@ -132,64 +145,137 @@ combined_features_reduced_pca = pca.fit_transform(combined_features.toarray())
 kmeans_pca = KMeans(max_iter=900, n_clusters=25, n_init=30, random_state=42)
 kmeans_pca.fit(combined_features_reduced_pca)
 
+# Function to register a new user
+def register_user(username, password):
+    if username in st.session_state.user_profiles:
+        st.warning("Username already exists. Please choose another.")
+    else:
+        st.session_state.user_profiles[username] = {
+            'password': password,
+            'watchlist': [],
+            'preferences': {}
+        }
+        st.success("Registration successful! You can now log in.")
+
+# Function to log in
+def login_user(username, password):
+    if username in st.session_state.user_profiles and st.session_state.user_profiles[username]['password'] == password:
+        st.session_state.current_user = username
+        st.success(f"Welcome, {username}!")
+        st.experimental_rerun()  # Force rerun to redirect to main app
+    else:
+        st.warning("Invalid username or password.")
+
+# Function to log out
+def logout_user():
+    st.session_state.current_user = None
+    st.experimental_rerun()
+
 # Function to get recommendations
 def recommend_anime_by_name(anime_name, kmeans_model, features_reduced, anime_df, num_recommendations=10):
-    # Get the closest match for the anime name
     close_matches = get_close_matches(anime_name, anime_df['name'], n=1, cutoff=0.1)
     if not close_matches:
-        return pd.DataFrame()  # Return empty DataFrame if no match is found
+        return pd.DataFrame()
 
     matched_name = close_matches[0]
     anime_index = anime_df[anime_df['name'] == matched_name].index[0]
 
-    # Predict the cluster for the given anime
     cluster_label = kmeans_model.predict(features_reduced[anime_index].reshape(1, -1))[0]
-
-    # Get all anime indices belonging to the same cluster
     cluster_indices = np.where(kmeans_model.labels_ == cluster_label)[0]
-
-    # Compute the cosine similarity matrix for the cluster
     cluster_features = features_reduced[cluster_indices]
     cosine_sim = cosine_similarity(cluster_features)
 
-    # Get similarity scores for all animes in the same cluster
     sim_scores = list(enumerate(cosine_sim[0]))
     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
-    # Get the top most similar animes
     sim_scores = sim_scores[1:num_recommendations + 1]
     anime_indices = [i[0] for i in sim_scores]
 
-    # Return the recommended animes
     return anime_df.iloc[anime_indices]
 
-# Function to get diverse recommendations by specific genres
+# Function to get recommendations by specific genres
 def get_recommendations_by_genre(anime_df, genre, num_recommendations=6):
-    genre_recommendations = anime_df[anime_df['genre'].str.contains(genre, case=False, na=False)].sample(num_recommendations)
-    return genre_recommendations
+    genre_filtered = anime_df[anime_df['genre'].str.contains(genre, case=False, na=False)]
+    if genre_filtered.empty:
+        st.warning(f"No anime found for genre: {genre}")
+        return pd.DataFrame()  # Return an empty DataFrame if no anime matches the genre
+    return genre_filtered.sample(num_recommendations)
 
-# Function to fetch anime image URL from MyAnimeList
+# Function to fetch anime image URL from Jikan API
 def fetch_image_url(anime_name):
     query = re.sub(r'\s+', '+', anime_name)  # Replace spaces with '+'
-    url = f"https://myanimelist.net/search/all?q={query}"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    img_tag = soup.find('img', class_='lazyload')
-    if img_tag:
-        return img_tag['data-src']
+    url = f"https://api.jikan.moe/v4/anime?q={query}&limit=1"
+    retries = 3
+    for i in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            anime = response.json()
+            if anime['data']:
+                return anime['data'][0]['images']['jpg']['large_image_url']
+            return None
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 429:
+                time.sleep(2 ** i)  # Exponential backoff
+            else:
+                raise
     return None
 
-# Function to display anime information with image and info button
-def display_anime_info_with_button(anime_row):
+# Function to display anime information with image and buttons
+def display_anime_info_with_button(anime_row, page):
     image_url = fetch_image_url(anime_row['name'])
     if image_url:
         st.image(image_url, width=150)
+
+    # Conditionally display the "Add to Watchlist" button
+    if page != "Watchlist" and st.button("Add to Watchlist", key=f"add_{anime_row['anime_id']}"):
+        add_to_watchlist(anime_row)
+
+    # Show Info button
     with st.expander("Show Info"):
         st.write(f"**Title:** {anime_row['name']}")
         st.write(f"**Genre:** {anime_row['genre']}")
         st.write(f"**Type:** {anime_row['type']}")
         st.write(f"**Rating:** {anime_row['rating_avg']:.2f}")
         st.write(f"**Number of Ratings:** {anime_row['num_ratings']}")
+        # Display user rating
+        if st.session_state.current_user:
+            rating = st.slider("Your Rating", 1, 10, 5, key=f"rating_{anime_row['anime_id']}")
+            if st.button("Submit Rating", key=f"submit_{anime_row['anime_id']}"):
+                submit_rating(anime_row['anime_id'], rating)
+
+    # Save the current displayed recommendations
+    if page not in st.session_state.displayed_recommendations:
+        st.session_state.displayed_recommendations[page] = {}
+    st.session_state.displayed_recommendations[page][anime_row['anime_id']] = anime_row
+
+# Function to add to watchlist
+def add_to_watchlist(anime_row):
+    if st.session_state.current_user:
+        user_data = st.session_state.user_profiles[st.session_state.current_user]
+        if anime_row['name'] not in user_data['watchlist']:
+            user_data['watchlist'].append(anime_row['name'])
+            st.success(f"Added {anime_row['name']} to your watchlist!")
+        else:
+            st.warning(f"{anime_row['name']} is already in your watchlist!")
+
+# Function to submit a rating
+def submit_rating(anime_id, rating):
+    if anime_id not in st.session_state.anime_ratings:
+        st.session_state.anime_ratings[anime_id] = []
+    st.session_state.anime_ratings[anime_id].append(rating)
+    st.success("Rating submitted!")
+
+# Calculate average rating for an anime
+def calculate_average_rating(anime_id):
+    if anime_id in st.session_state.anime_ratings:
+        ratings = st.session_state.anime_ratings[anime_id]
+        return sum(ratings) / len(ratings)
+    return 0
+
+# Update average ratings in anime_df
+def update_anime_df_ratings():
+    anime_df['user_rating_avg'] = anime_df['anime_id'].apply(calculate_average_rating)
 
 # Custom CSS for styling
 st.markdown(
@@ -211,50 +297,117 @@ st.markdown(
 # Streamlit App
 st.markdown('<h1 style="text-align: center; color: green;">P̧͕̒̊͘ḣ̖̻͛̓o̯̱̊͊͢ẹ̿͋̒̕ṇ̤͛̒̍ỉ͔͖̜͌x̛̘̠̹͋A̷͙ͭͫ̕ṇ̤͛̒̍ỉ͔͖̜͌ḿ̬̏ͤͅẹ̿͋̒̕</h1>', unsafe_allow_html=True)
 
+# Check if user is logged in
+if st.session_state.current_user is None:
+    st.sidebar.title("Authentication")
+    auth_option = st.sidebar.radio("Choose Auth", ["Login", "Register"], key="auth_radio")
+    if auth_option == "Register":
+        st.write("## Register")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type='password')
+        if st.button("Register"):
+            register_user(username, password)
+    elif auth_option == "Login":
+        st.write("## Login")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type='password')
+        if st.button("Login"):
+            login_user(username, password)
+else:
+    # Update anime_df with user ratings
+    update_anime_df_ratings()
 
-# Sidebar Navigation
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Home", "Search"])
+    # Sidebar Navigation
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Go to", ["Home", "Search", "Watchlist"], key="navigation_radio")
+    if st.sidebar.button("Logout"):
+        logout_user()
 
-# Home Page - Recommended for You
-if page == "Home":
-    st.write('## Recommended for You')
+    # Home Page - Recommended for You
+    if page == "Home":
+        st.write('## Recommended for You')
+        
+        if st.session_state.current_user:
+            user_data = st.session_state.user_profiles[st.session_state.current_user]
+            # Get personalized recommendations based on user preferences
+            if page not in st.session_state.displayed_recommendations or not st.session_state.displayed_recommendations[page]:
+                comedy_recommendations = get_recommendations_by_genre(anime_df, 'Comedy', num_recommendations=6)
+                action_recommendations = get_recommendations_by_genre(anime_df, 'Action', num_recommendations=6)
+                romance_recommendations = get_recommendations_by_genre(anime_df, 'Romance', num_recommendations=6)
+                st.session_state.displayed_recommendations[page] = {
+                    'Comedy': comedy_recommendations,
+                    'Action': action_recommendations,
+                    'Romance': romance_recommendations
+                }
 
-    # Get recommendations for specific genres
-    comedy_recommendations = get_recommendations_by_genre(anime_df, 'Comedy', num_recommendations=6)
-    action_recommendations = get_recommendations_by_genre(anime_df, 'Action', num_recommendations=6)
-    romance_recommendations = get_recommendations_by_genre(anime_df, 'Romance', num_recommendations=6)
+            recommendations = st.session_state.displayed_recommendations[page]
 
-    # Display recommendations in rows by genre
-    st.write("### Comedy")
-    for idx, row in comedy_recommendations.iterrows():
-        display_anime_info_with_button(row)
-        st.write("---")
+            # Display recommendations in rows by genre
+            st.write("### Comedy")
+            for idx, row in recommendations['Comedy'].iterrows():
+                display_anime_info_with_button(row, page)
+                st.write("---")
 
-    st.write("### Action")
-    for idx, row in action_recommendations.iterrows():
-        display_anime_info_with_button(row)
-        st.write("---")
+            st.write("### Action")
+            for idx, row in recommendations['Action'].iterrows():
+                display_anime_info_with_button(row, page)
+                st.write("---")
 
-    st.write("### Romance")
-    for idx, row in romance_recommendations.iterrows():
-        display_anime_info_with_button(row)
-        st.write("---")
-
-# Search Page - Anime Search
-elif page == "Search":
-    st.write('## Search for an Anime')
-
-    # User input: Search for an anime
-    search_anime = st.text_input('Search for an anime you like:')
-
-    # Show recommendations based on search
-    if search_anime:
-        recommendations = recommend_anime_by_name(search_anime, kmeans_pca, combined_features_reduced_pca, anime_df, num_recommendations=10)
-        if not recommendations.empty:
-            st.write(f'Top 10 Recommendations for "{search_anime}":')
-            for _, row in recommendations.iterrows():
-                display_anime_info_with_button(row)
+            st.write("### Romance")
+            for idx, row in recommendations['Romance'].iterrows():
+                display_anime_info_with_button(row, page)
                 st.write("---")
         else:
-            st.write('No anime found with that name. Please try another name.')
+            st.warning("Please log in to see personalized recommendations.")
+
+    # Search Page - Anime Search
+    elif page == "Search":
+        st.write('## Search for an Anime')
+
+        search_anime = st.text_input('Search for an anime you like:')
+
+        if search_anime:
+            if search_anime not in st.session_state.displayed_recommendations['Search']:
+                # Get the anime that matches the search term
+                close_matches = get_close_matches(search_anime, anime_df['name'], n=1, cutoff=0.1)
+                if close_matches:
+                    matched_name = close_matches[0]
+                    searched_anime = anime_df[anime_df['name'] == matched_name].iloc[0]
+                    recommendations = recommend_anime_by_name(matched_name, kmeans_pca, combined_features_reduced_pca, anime_df, num_recommendations=10)
+                    st.session_state.displayed_recommendations['Search'][search_anime] = (searched_anime, recommendations)
+                else:
+                    searched_anime = None
+                    recommendations = pd.DataFrame()
+                    st.session_state.displayed_recommendations['Search'][search_anime] = (searched_anime, recommendations)
+            else:
+                searched_anime, recommendations = st.session_state.displayed_recommendations['Search'][search_anime]
+
+            if searched_anime is not None:
+                st.write(f'### Anime found for "{search_anime}":')
+                display_anime_info_with_button(searched_anime, 'Search')
+
+            if not recommendations.empty:
+                st.write(f'### Top 10 Recommendations for "{search_anime}":')
+                for _, row in recommendations.iterrows():
+                    display_anime_info_with_button(row, 'Search')
+                    st.write("---")
+            else:
+                st.write('No anime found with that name. Please try another name.')
+
+    # Watchlist Page
+    elif page == "Watchlist":
+        st.write('## Your Watchlist')
+        if st.session_state.current_user:
+            user_data = st.session_state.user_profiles[st.session_state.current_user]
+            if user_data['watchlist']:
+                for anime_name in user_data['watchlist']:
+                    anime_row = anime_df[anime_df['name'].str.lower() == anime_name.lower()]
+                    if not anime_row.empty:
+                        display_anime_info_with_button(anime_row.iloc[0], 'Watchlist')
+                        st.write("---")
+                    else:
+                        st.warning(f"{anime_name} not found in the database.")
+            else:
+                st.write("Your watchlist is empty. Add some anime from the Home or Search pages!")
+        else:
+            st.warning("Please log in to view your watchlist.")
